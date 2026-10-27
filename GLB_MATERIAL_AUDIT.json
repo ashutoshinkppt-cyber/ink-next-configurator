@@ -1,0 +1,242 @@
+{
+  "file": "CAR(5).glb",
+  "bytes": 85650932,
+  "node_count": 31,
+  "mesh_count": 23,
+  "material_count": 50,
+  "texture_count": 47,
+  "image_count": 45,
+  "animation_count": 0,
+  "nodes": [
+    {
+      "object": "Door_RL",
+      "materials": [
+        "Black Glossy",
+        "Car_Paint",
+        "Chrome_Mat",
+        "DoorPanelRear",
+        "Glass_Mat",
+        "Grille_Mat",
+        "rubber"
+      ]
+    },
+    {
+      "object": "Door_RR",
+      "materials": [
+        "Black Glossy",
+        "Car_Paint",
+        "Chrome_Mat",
+        "DoorPanelRear",
+        "Glass_Mat",
+        "Grille_Mat",
+        "rubber"
+      ]
+    },
+    {
+      "object": "Door_FL",
+      "materials": [
+        "Black Glossy",
+        "Car_Paint",
+        "Chrome_Mat",
+        "Glass_Mat",
+        "Grille_Mat",
+        "Interior_Mat",
+        "Metal Turnsignal",
+        "rubber"
+      ]
+    },
+    {
+      "object": "Door_FR",
+      "materials": [
+        "Black Glossy",
+        "Car_Paint",
+        "Chrome_Mat",
+        "Glass_Mat",
+        "Grille_Mat",
+        "Interior_Mat",
+        "Metal Turnsignal",
+        "rubber"
+      ]
+    },
+    {
+      "object": "Tyre_FL",
+      "materials": [
+        "Metal Rough.001",
+        "Plastic.001",
+        "Tyre_Mat",
+        "caliper.002",
+        "chrome.002",
+        "disc.001",
+        "metal_rough.002",
+        "null.002"
+      ]
+    },
+    {
+      "object": "Tyre_FR",
+      "materials": [
+        "Metal Rough.001",
+        "Plastic.001",
+        "Tyre_Mat",
+        "Tyre_Mat.001",
+        "caliper.002",
+        "chrome.002",
+        "disc.001",
+        "metal_rough.002",
+        "null.002"
+      ]
+    },
+    {
+      "object": "Tyre_RR",
+      "materials": [
+        "Metal Rough.001",
+        "Plastic.001",
+        "Tyre_Mat",
+        "caliper.002",
+        "chrome.002",
+        "disc.001",
+        "metal_rough.002",
+        "null.002"
+      ]
+    },
+    {
+      "object": "Tyre_RL",
+      "materials": [
+        "Metal Rough.001",
+        "Plastic.001",
+        "Tyre_Mat",
+        "caliper.002",
+        "chrome.002",
+        "disc.001",
+        "metal_rough.002",
+        "null.002"
+      ]
+    },
+    {
+      "object": "Car_Glass",
+      "materials": [
+        "Glass_Mat"
+      ]
+    },
+    {
+      "object": "Steering",
+      "materials": [
+        "Steering_Mat"
+      ]
+    },
+    {
+      "object": "Screen",
+      "materials": [
+        "Screen_Mat"
+      ]
+    },
+    {
+      "object": "SeatBelts ",
+      "materials": [
+        "Interior_Mat.001",
+        "Seat_Mat-2"
+      ]
+    },
+    {
+      "object": "Seat_Rear",
+      "materials": [
+        "Interior_Mat.001",
+        "Seat_Mat-2"
+      ]
+    },
+    {
+      "object": "Seat_FR",
+      "materials": [
+        "Seat_Mat-1"
+      ]
+    },
+    {
+      "object": "Car_Name",
+      "materials": [
+        "Chrome_Mat"
+      ]
+    },
+    {
+      "object": "Infotainment_Screen",
+      "materials": [
+        "info_Mat"
+      ]
+    },
+    {
+      "object": "Car_Lights",
+      "materials": [
+        "Black Glass",
+        "Glass Taillight",
+        "GlassRunninglight",
+        "Glass_Mat",
+        "Glass_wavey",
+        "Headlight Insides",
+        "Light_Mat",
+        "Metal Rough",
+        "Taillight",
+        "Translucent_Glass",
+        "Translucent_Glass.001",
+        "Turn signal(taillight)",
+        "emission",
+        "heaxagon glass",
+        "turnsignal"
+      ]
+    },
+    {
+      "object": "Seat_FL",
+      "materials": [
+        "Seat_Mat-1"
+      ]
+    },
+    {
+      "object": "Dashboard",
+      "materials": [
+        "Dashboard_Mat"
+      ]
+    },
+    {
+      "object": "Car_Grille",
+      "materials": [
+        "Black Glass",
+        "Black Glossy",
+        "Chrome_Mat",
+        "Glass_Mat",
+        "Grille_Mat",
+        "null"
+      ]
+    },
+    {
+      "object": "CenterConsole",
+      "materials": [
+        "Interior_Mat.001",
+        "canterConsole_Mat",
+        "crystal"
+      ]
+    },
+    {
+      "object": "Inner_Body",
+      "materials": [
+        "Black Glossy",
+        "Car_Paint",
+        "Chrome_Mat",
+        "Grille_Mat",
+        "Interior_Mat.001",
+        "Light_Mat",
+        "Metal Black Rough",
+        "Metal Rough",
+        "null",
+        "tailpipes"
+      ]
+    },
+    {
+      "object": "Car_Body",
+      "materials": [
+        "Black Glossy.001",
+        "Car_Paint.001",
+        "Plastic",
+        "null.001",
+        "rubber.001",
+        "tailpipes.001"
+      ]
+    }
+  ]
+}
