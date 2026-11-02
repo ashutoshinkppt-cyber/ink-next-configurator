@@ -1,6 +1,8 @@
-import { Component, useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
+import { Component, Suspense, lazy, useCallback, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { ArrowRight, ChevronRight, DoorOpen, Menu, RotateCcw, X, Layers3, CarFront, Car, ArrowUp, Gauge, Palette, Armchair, Mail, CheckCircle2, AlertCircle, RotateCw, Phone, MapPin, ExternalLink } from 'lucide-react';
-import { CarScene } from './components/CarScene';
+// Load the substantial Three.js/R3F viewer code only after the visitor chooses 3D.
+const LazyCarScene = lazy(() => import('./components/CarScene').then(module => ({ default: module.CarScene })));
+const preload3DCode = () => { void import('./components/CarScene'); };
 import { doorPivotMap, interiors, paints, type Quality, type View } from './config';
 import { STUDIO_CONTACT_EMAIL, STUDIO_CONTACT_PHONE, STUDIO_ADDRESS, STUDIO_WEBSITE, STUDIO_BEHANCE, STUDIO_VIMEO } from './siteSettings';
 
@@ -319,13 +321,13 @@ function App(){
    </div>}
   <main className="showroom">
    <div className="scene-underlay" aria-hidden="true"><div className="studio-wall"/><div className="ceiling-architecture"/><div className="ceiling-oculus"/><div className="ceiling-rim"/><div className="light-ring"/><div className="back-light left"/><div className="back-light right"/><div className="studio-floor"/><div className="floor-orbit"/></div>
-   {allow3d && <div className="model-canvas"><WebGLErrorBoundary onError={handleModelError}><CarScene onContextLost={handleGraphicsFailure} paused={paused||tabHidden} paintIndex={paintIndex} interiorIndex={interiorIndex} view={view} quality={quality} openDoors={doors} spinningWheels={wheels} debugPaint={debugPaint} onReady={onReady}/></WebGLErrorBoundary></div>}
+   {allow3d && <div className="model-canvas"><WebGLErrorBoundary onError={handleModelError}><Suspense fallback={<div className="loading-tip" role="status">PREPARING 3D VIEWER…</div>}><LazyCarScene onContextLost={handleGraphicsFailure} paused={paused||tabHidden} paintIndex={paintIndex} interiorIndex={interiorIndex} view={view} quality={quality} openDoors={doors} spinningWheels={wheels} debugPaint={debugPaint} onReady={onReady}/></Suspense></WebGLErrorBoundary></div>}
    {!allow3d && <div className={`safe-preview ${webglError?'safe-preview-error':''}`}><div className="safe-preview-copy">
       <span className="safe-kicker">INK NEXT / AUTOMOTIVE EXPERIENCE</span>
       <h2>{webglError?'3D viewer paused.':'Designed to be explored.'}</h2>
       <p>{webglError?'Your device or browser stopped the WebGL graphics session. The rest of the configurator is available without 3D.':'Discover each finish and detail in our interactive automotive showroom.'}</p>
       {webglError ? <div className="safe-actions"><p role="alert" className="gpu-error">{webglError}</p><span>Do not restart 3D on the affected computer until its graphics fault is investigated.</span><button className="safe-secondary" onClick={()=>window.location.reload()}>RELOAD PAGE IN PREVIEW MODE</button></div>
-       : <div className="safe-actions"><button className="safe-primary" onClick={()=>{setWebglError('');setQuality('low');setWheels({...OFF});setAllow3d(true);setReady(false)}}>ENTER 3D SHOWROOM</button><span>Optional 3D · Low quality loads first.</span></div>}
+       : <div className="safe-actions"><button className="safe-primary" onPointerEnter={preload3DCode} onFocus={preload3DCode} onClick={()=>{setWebglError('');setQuality('low');setWheels({...OFF});setAllow3d(true);setReady(false)}}>ENTER 3D SHOWROOM</button><span>Optional 3D · Low quality loads first.</span></div>}
     </div></div>}
    {allow3d&&!ready&&<div className="loading-tip" role="status">LOADING YOUR 3D CAR EXPERIENCE…</div>}
    <aside className={`settings-panel ${panelExpanded?"sheet-expanded":"sheet-peek"}`}>

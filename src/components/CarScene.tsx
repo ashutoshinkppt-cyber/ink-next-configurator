@@ -1,6 +1,6 @@
-import {Suspense, useEffect, useMemo, useRef, useState} from 'react';
+import {Suspense, useEffect, useLayoutEffect, useMemo, useRef, memo} from 'react';
 import {Canvas, useFrame, useThree} from '@react-three/fiber';
-import {ContactShadows, Environment, Html, OrbitControls, useGLTF, useProgress} from '@react-three/drei';
+import {Html, OrbitControls, useGLTF, useProgress} from '@react-three/drei';
 import * as THREE from 'three';
 import type {OrbitControls as OrbitControlsImpl} from 'three-stdlib';
 import {doorPivotMap, interiors, paints, type Quality, type View} from '../config';
@@ -116,7 +116,7 @@ function makeGhostMaterial():THREE.ShaderMaterial {
   side:THREE.FrontSide,polygonOffset:true,polygonOffsetFactor:-1,polygonOffsetUnits:-1,
  });
 }
-function Model({paintIndex,interiorIndex,view,openDoors,spinningWheels,headlights=false,taillights=false,debugPaint,onReady}:Omit<Props,'quality'>){
+const Model = memo(function Model({paintIndex,interiorIndex,view,openDoors,spinningWheels,headlights=false,taillights=false,debugPaint,onReady}:Omit<Props,'quality'>){
  const {scene}=useGLTF('/models/car.glb');
  // Keep the uniforms/materials alive across paint clicks. V31 recreated the entire
  // GLB scene on each selection, losing the shader's animated wipe progress.
@@ -238,7 +238,7 @@ function Model({paintIndex,interiorIndex,view,openDoors,spinningWheels,headlight
   });
   return {paint,seats,xray,shellOverlays,pivots,lightSurfaces,lightLenses,initialDoor:Object.fromEntries(Object.values(doorPivotMap).map(d=>[d.name,pivots[d.name]?.rotation.y??0])),initialWheel:Object.fromEntries(['FL','FR','RL','RR'].map(k=>[k,pivots[`Pivot_Tyre_${k}`]?.rotation.x??0]))};
  },[root]);
- const xrayLevel=useRef(0);const wheelAngles=useRef<Record<string,number>>({FL:0,FR:0,RL:0,RR:0});
+ const xrayLevel=useRef(0);const didNotifyReady=useRef(false);const wheelAngles=useRef<Record<string,number>>({FL:0,FR:0,RL:0,RR:0});
  useEffect(()=>{
   if(!debugPaint){
    wipe.previous.value.set(paints[paintIndex].color);
@@ -274,8 +274,9 @@ function Model({paintIndex,interiorIndex,view,openDoors,spinningWheels,headlight
   }
  },[managed,headlights,taillights]);
  const seatTarget=useMemo(()=>new THREE.Color(interiors[interiorIndex].color),[interiorIndex]);
- useEffect(()=>{onReady()},[onReady]);
+ // Avoid marking the model ready before it has had its first render update.
  useFrame((_,delta)=>{
+  if(!didNotifyReady.current){didNotifyReady.current=true;onReady()}
   const dt=Math.min(delta,.05),k=1-Math.exp(-dt*3.5);const p=paints[paintIndex];
   if(wipe.progress.value<1)wipe.progress.value=Math.min(1,wipe.progress.value+dt/1.65);
   managed.paint.forEach(m=>{
@@ -333,7 +334,7 @@ function Model({paintIndex,interiorIndex,view,openDoors,spinningWheels,headlight
   dispose.forEach(m=>m.dispose());
  },[root,managed]);
  return <primitive object={root}/>;
-}
+});
 function CameraRig({view,controls}:{view:View;controls:React.RefObject<OrbitControlsImpl|null>}){
  const {camera,invalidate,size}=useThree();const anim=useRef(true);const desired=new THREE.Vector3(),target=new THREE.Vector3();
  useEffect(()=>{anim.current=true;invalidate()},[view,invalidate,size.width,size.height]);
@@ -363,20 +364,33 @@ function CabinLighting({view}:{view:View}){
 function Loader(){const {progress}=useProgress();return <Html center><div className="webgl-loading"><div className="loader-ring"/><span>PREPARING YOUR VEHICLE</span><strong>{Math.round(progress)}%</strong></div></Html>}
 function RenderScheduler({signal,spinning,quality}:{signal:string;spinning:boolean;quality:Quality}){
  const {invalidate}=useThree();
+ const qualityRef=useRef(quality);
+ qualityRef.current=quality;
+ // Paint, doors, camera and X-ray still animate for a bounded time.
+ // A quality-only change must not restart that multi-second animation cycle.
  useEffect(()=>{
-  // Invalidation is paced, rather than recursively requesting an unlimited
-  // 60-120 FPS render. Only animate during a transition or wheel movement.
-  const fps=quality==='low'?20:quality==='balanced'?26:32;
-  let ticks=0;
-  const maxTicks=Math.ceil(fps*3.2);
-  invalidate();
-  const timer=window.setInterval(()=>{
+  let timeout=0;
+  let cancelled=false;
+  const deadline=performance.now()+3200;
+  const tick=()=>{
+   if(cancelled)return;
    invalidate();
-   ticks++;
-   if(!spinning && ticks>=maxTicks)window.clearInterval(timer);
-  },1000/fps);
-  return ()=>window.clearInterval(timer);
- },[signal,spinning,quality,invalidate]);
+   if(!spinning && performance.now()>=deadline)return;
+   const q=qualityRef.current;
+   const fps=q==='low'?20:q==='balanced'?26:32;
+   timeout=window.setTimeout(tick,1000/fps);
+  };
+  tick();
+  return ()=>{cancelled=true;window.clearTimeout(timeout)};
+ },[signal,spinning,invalidate]);
+ useEffect(()=>{
+  // DPR is applied in useLayoutEffect. These two redraws expose the new
+  // quality without a new 3.2 second timer.
+  invalidate();
+  const raf=window.requestAnimationFrame(()=>invalidate());
+  const timer=window.setTimeout(()=>invalidate(),100);
+  return ()=>{window.cancelAnimationFrame(raf);window.clearTimeout(timer)};
+ },[quality,invalidate]);
  return null;
 }
 // Listener lifecycle follows React, so manual/unintentional unmounts do not
@@ -392,18 +406,19 @@ function GraphicsContextGuard({onLost}:{onLost?:()=>void}){
  return null;
 }
 function PixelRatioLimiter({quality}:{quality:Quality}){
- const {setDpr,size}=useThree();
- useEffect(()=>{
+ const {setDpr,size,invalidate}=useThree();
+ useLayoutEffect(()=>{
   // High is selectable, but intentionally capped below native resolution.
   // A cap on total frame pixels also limits large desktop or external monitors.
-  const desired=quality==='low'?.50:quality==='balanced'?.62:.76;
-  const pixelBudget=quality==='low'?500_000:quality==='balanced'?800_000:1_180_000;
+  const desired=quality==='low'?.70:quality==='balanced'?.90:1.10;
+  const pixelBudget=quality==='low'?1_000_000:quality==='balanced'?1_650_000:2_200_000;
   const fit=Math.sqrt(pixelBudget/Math.max(1,size.width*size.height));
   setDpr(Math.max(.3,Math.min(desired,fit)));
- },[quality,size.width,size.height,setDpr]);
+  invalidate();
+ },[quality,size.width,size.height,setDpr,invalidate]);
  return null;
 }
-function ShowroomArchitecture({quality}:{quality:Quality}){
+const ShowroomArchitecture = memo(function ShowroomArchitecture(){
  // Static geometry only, no expensive realtime reflection framebuffer.
  
  return <group>
@@ -435,15 +450,15 @@ function ShowroomArchitecture({quality}:{quality:Quality}){
   </mesh>
 
  </group>;
-}
+});
 export function CarScene(props:Props){
  const controls=useRef<OrbitControlsImpl|null>(null);
- const signal=[props.paintIndex,props.interiorIndex,props.view,!!props.headlights,!!props.taillights,props.debugPaint,...Object.values(props.openDoors),...Object.values(props.spinningWheels),props.quality].join('|');
+ const signal=[props.paintIndex,props.interiorIndex,props.view,!!props.headlights,!!props.taillights,props.debugPaint,...Object.values(props.openDoors),...Object.values(props.spinningWheels)].join('|');
  const spinning=Object.values(props.spinningWheels).some(Boolean);
- return <Canvas frameloop={props.paused?'never':'demand'} dpr={0.5} gl={{antialias:false,powerPreference:'low-power',alpha:true,precision:'mediump',stencil:false,depth:true}} camera={{position:[5.4,2.22,7.65],fov:38,near:.03,far:120}} onCreated={({gl})=>{gl.outputColorSpace=THREE.SRGBColorSpace;gl.toneMapping=THREE.ACESFilmicToneMapping;gl.toneMappingExposure=.96}}>
+ return <Canvas frameloop={props.paused?'never':'demand'} dpr={0.7} gl={{antialias:true,powerPreference:'low-power',alpha:true,precision:'highp',stencil:false,depth:true}} camera={{position:[5.4,2.22,7.65],fov:38,near:.03,far:120}} onCreated={({gl})=>{gl.outputColorSpace=THREE.SRGBColorSpace;gl.toneMapping=THREE.ACESFilmicToneMapping;gl.toneMappingExposure=.96}}>
  <GraphicsContextGuard onLost={props.onContextLost}/>
  <PixelRatioLimiter quality={props.quality}/><RenderScheduler signal={signal} spinning={spinning} quality={props.quality}/>
- <ShowroomArchitecture quality={props.quality}/>
+ <ShowroomArchitecture/>
  <ambientLight intensity={1.28}/><hemisphereLight intensity={1.32} color="#fffaf4" groundColor="#b8afa7"/>
  <directionalLight intensity={1.75} position={[4.2,7.2,6.4]} color="#fffaf2"/>
  <directionalLight intensity={1.35} position={[-5.2,4.6,-4.6]} color="#f5f3f0"/>
