@@ -5,19 +5,35 @@ import * as THREE from 'three';
 import type {OrbitControls as OrbitControlsImpl} from 'three-stdlib';
 import {doorPivotMap, interiors, paints, type Quality, type View} from '../config';
 
-type Props={paused?:boolean;paintIndex:number;interiorIndex:number;view:View;quality:Quality;openDoors:Record<string,boolean>;spinningWheels:Record<string,boolean>;headlights:boolean;taillights:boolean;debugPaint:boolean;onReady:()=>void};
+type Props={onContextLost?:()=>void;paused?:boolean;paintIndex:number;interiorIndex:number;view:View;quality:Quality;openDoors:Record<string,boolean>;spinningWheels:Record<string,boolean>;headlights?:boolean;taillights?:boolean;debugPaint:boolean;onReady:()=>void};
 type Managed={mat:THREE.MeshStandardMaterial;original:{transparent:boolean;opacity:number;depthWrite:boolean;side:THREE.Side};category:'paint'|'glass'|'trim'|'innerPaint'};
 type ShellOverlay={mesh:THREE.Mesh;mat:THREE.ShaderMaterial};
 const PAINT=new Set(['Car_Paint','Car_Paint.001']);
 const GLASS=new Set(['Glass_Mat']);
 const SEAT_FRONT='Seat_Mat-1', SEAT_REAR='Seat_Mat-2';
-// Exact material names found in CAR(5).glb. Only meshes under Car_Lights
-// are modified, to prevent Light_Mat in Inner_Body from glowing.
-const FRONT_EMITTERS=new Set(['Light_Mat','GlassRunninglight','emission']);
-const REAR_EMITTERS=new Set(['Taillight']);
-type LightSurface={mat:THREE.MeshStandardMaterial;group:'front'|'rear';baseColor:THREE.Color;baseEmissive:THREE.Color;baseIntensity:number};
+// CAR (1).glb / Blender hierarchy: Front_Light and Back_Light collections may be
+// flattened by glTF export. Match both explicit parent groups (if present) and
+// all exported mesh names, including Blender's .001, .002 etc suffixes.
+// Do NOT classify by material: non-emitting trim shares those materials.
+const FRONT_LED_PATTERN=/^Emitters Headlight(?:\.\d{3})?$/;
+const REAR_LED_PATTERN=/^(?:MainReflectors Taillight|Reflector TrunkTaillight)(?:\.\d{3})?$/;
+const FRONT_LENS_PATTERN=/^(?:Glass Headlight|Glass Runninglight)(?:\.\d{3})?$/;
+const REAR_LENS_PATTERN=/^(?:Diffusers Taillight|Diffuser TrunkTaillight|Side Diffuser Taillight\s*)(?:\.\d{3})?$/;
+const FRONT_RUNNING_PATTERN=/^Glass Runninglight(?:\.\d{3})?$/;
+const REAR_DIFFUSER_PATTERN=/^(?:Diffusers Taillight|Diffuser TrunkTaillight)(?:\.\d{3})?$/;
+
+// Every lit surface gets a lightweight UNLIT material when switched on.
+// The off state restores its own cloned GLB material, including original textures.
+// This prevents dark source albedo, missing glTF emissiveFactor, and low-PBR
+// lighting from making a user-selected LED appear unlit.
+function litMaterial(group:'front'|'rear',kind:'emitter'|'diffuser'='emitter'){
+ return new THREE.MeshBasicMaterial({name:`INK_${group}_${kind}_LED`,color:group==='front'?'#e4f5ff':'#fa334a',toneMapped:false,side:THREE.DoubleSide,depthTest:true,depthWrite:kind==='emitter',transparent:kind==='diffuser',opacity:kind==='diffuser'?.88:1});
+}
+const BRAND_NODE_NAME='Car_Name';
+type LightSurface={mesh:THREE.Mesh;group:'front'|'rear';offMaterial:THREE.Material|THREE.Material[];onMaterial:THREE.Material|THREE.Material[];originalOrder:number};
+type LightLens={mat:THREE.MeshStandardMaterial;group:'front'|'rear';originalColor:THREE.Color;originalTransparent:boolean;originalOpacity:number;originalDepthWrite:boolean;originalTransmission:number|null;originalRoughness:number};
 const cameraPresets:Record<View,{pos:[number,number,number];target:[number,number,number]}>= {
- hero:{pos:[4.9,2.15,6.9],target:[0,1.08,0]}, front:{pos:[.2,1.5,7.8],target:[0,.93,0]},side:{pos:[8.2,1.65,.25],target:[0,.95,0]},rear:{pos:[-.2,1.5,-7.8],target:[0,.93,0]},top:{pos:[4.7,6.5,5.3],target:[0,.83,0]}, interior:{pos:[.40,1.3,1.45],target:[-.15,1.10,-.65]},xray:{pos:[5.6,4.55,6.45],target:[0,1.12,0]}
+ hero:{pos:[4.3,1.85,6.25],target:[0,1.01,0]}, front:{pos:[.2,1.5,7.8],target:[0,.93,0]},side:{pos:[8.2,1.65,.25],target:[0,.95,0]},rear:{pos:[-.2,1.5,-7.8],target:[0,.93,0]},top:{pos:[4.7,6.5,5.3],target:[0,.83,0]}, interior:{pos:[.40,1.3,1.45],target:[-.15,1.10,-.65]},xray:{pos:[5.6,4.55,6.45],target:[0,1.12,0]}
 };
 function ancestorName(o:THREE.Object3D, name:string){let node:THREE.Object3D|null=o;while(node){if(node.name===name)return true;node=node.parent}return false}
 function anyAncestor(o:THREE.Object3D,names:string[]){return names.some(n=>ancestorName(o,n))}
@@ -54,8 +70,8 @@ function createWipeMaterial(name:string, controls:WipeControls){
   ).replace(
     '#include <color_fragment>',
     `#include <color_fragment>
-     // Car's approximate body extent is -2.5 to +2.5 along Z.
-     // Soft moving paint boundary; direction alternates on each selection.
+     // The model's front is +Z, rear is -Z: wipe begins at +Z.
+     // Soft moving paint boundary; it always travels from front to rear.
      float normalizedZ = clamp((vWipeZ + 2.5) / 5.0, 0.0, 1.0);
      float positionAlongWipe = mix(normalizedZ, 1.0-normalizedZ, uWipeDirection);
      float sweep = smoothstep(positionAlongWipe - 0.12, positionAlongWipe + 0.12, uWipeProgress * 1.24 - 0.12);
@@ -100,42 +116,53 @@ function makeGhostMaterial():THREE.ShaderMaterial {
   side:THREE.FrontSide,polygonOffset:true,polygonOffsetFactor:-1,polygonOffsetUnits:-1,
  });
 }
-function Model({paintIndex,interiorIndex,view,openDoors,spinningWheels,headlights,taillights,debugPaint,onReady}:Omit<Props,'quality'>){
+function Model({paintIndex,interiorIndex,view,openDoors,spinningWheels,headlights=false,taillights=false,debugPaint,onReady}:Omit<Props,'quality'>){
  const {scene}=useGLTF('/models/car.glb');
+ // Keep the uniforms/materials alive across paint clicks. V31 recreated the entire
+ // GLB scene on each selection, losing the shader's animated wipe progress.
  const wipe=useMemo<WipeControls>(()=>({
   progress:{value:1},
-  previous:{value:new THREE.Color(paints[0].color)},
-  next:{value:new THREE.Color(paints[0].color)},
-  direction:{value:0}
+  previous:{value:new THREE.Color(paints[paintIndex].color)},
+  next:{value:new THREE.Color(paints[paintIndex].color)},
+  direction:{value:1}
  }),[]);
- const lastPaint=useRef(0);
+ const lastPaint=useRef(paintIndex);
  useEffect(()=>{
   if(lastPaint.current===paintIndex)return;
-  // A new selection restarts the wave from the previous selected finish.
+  // Always sweep paint from the front (+Z) toward the rear (-Z).
+  // The uniform values are shared by every painted part, including doors.
   wipe.previous.value.copy(wipe.next.value);
   wipe.next.value.set(paints[paintIndex].color);
   wipe.progress.value=0;
-  wipe.direction.value=1-wipe.direction.value;
+  wipe.direction.value=1;
   lastPaint.current=paintIndex;
  },[paintIndex,wipe]);
  const root=useMemo(()=>{
   const copy=scene.clone(true);
   copy.traverse(o=>{
    if(!(o instanceof THREE.Mesh))return;
+   const isBrand=ancestorName(o,BRAND_NODE_NAME);
    const original=Array.isArray(o.material)?o.material:[o.material];
    const cloned=original.map(mat=>{
     // IMPORTANT: the car GLB has distinct paint primitives called Car_Paint and
     // Car_Paint.001. Replace EACH primitive's material with a clean independent
     // material. Merely changing imported glTF material.color was insufficient.
-    if(PAINT.has(mat.name)){
+    if(!isBrand && PAINT.has(mat.name)){
       const m=createWipeMaterial(mat.name,wipe);
       return m;
     }
     const m=mat.clone();
     if(m instanceof THREE.MeshStandardMaterial){
-     if(GLASS.has(m.name)){
-      m.map=null;m.color.set('#a4bcc6');m.metalness=0;m.roughness=.16;
-      m.transparent=true;m.opacity=.28;m.depthWrite=false;m.side=THREE.FrontSide;
+     if(isBrand){
+      m.color.set('#d9d2c9');
+      m.metalness=Math.max(.72,m.metalness);
+      m.roughness=Math.min(.24,m.roughness);
+      m.emissive.set('#3e362f');
+      m.emissiveIntensity=.22;
+     }
+     if(!isBrand && GLASS.has(m.name)){
+      m.map=null;m.color.set('#bcc7cd');m.metalness=.02;m.roughness=.12;
+      m.transparent=true;m.opacity=.24;m.depthWrite=false;m.side=THREE.FrontSide;
       if(m instanceof THREE.MeshPhysicalMaterial){m.transmission=0;m.thickness=0;m.ior=1.46}
      }
      if(((ancestorName(o,'Seat_FL')||ancestorName(o,'Seat_FR'))&&m.name===SEAT_FRONT)||(ancestorName(o,'Seat_Rear')&&m.name===SEAT_REAR)){
@@ -147,6 +174,8 @@ function Model({paintIndex,interiorIndex,view,openDoors,spinningWheels,headlight
    });
    o.material=Array.isArray(o.material)?cloned:cloned[0];o.frustumCulled=true;
   });
+  // Car_Name is the original badge/logotype mesh. It remains named and textured
+  // as exported; no paint, X-ray or light state ever changes its material.
   // Ground the complete car at y=0, using measured geometry (no GLB edits).
   copy.updateMatrixWorld(true);
   const bounds=new THREE.Box3().setFromObject(copy);
@@ -155,10 +184,11 @@ function Model({paintIndex,interiorIndex,view,openDoors,spinningWheels,headlight
  },[scene,wipe]);
  const managed=useMemo(()=>{
   const paint:THREE.MeshStandardMaterial[]=[];const seats:THREE.MeshStandardMaterial[]=[];const xray:Managed[]=[];const shellOverlays:ShellOverlay[]=[];
-  const pivots:Record<string,THREE.Object3D>={};const lightSurfaces:LightSurface[]=[];
+  const pivots:Record<string,THREE.Object3D>={};const lightSurfaces:LightSurface[]=[];const lightLenses:LightLens[]=[];
   root.traverse(o=>{
    if(o.name.startsWith('Pivot_Door_')||o.name.startsWith('Pivot_Tyre_'))pivots[o.name]=o;
    if(!(o instanceof THREE.Mesh))return;
+   const isBrand=ancestorName(o,BRAND_NODE_NAME);
    const isBody=anyAncestor(o,['Car_Body','Inner_Body','Door_FL','Door_FR','Door_RL','Door_RR']);
    const isShell=anyAncestor(o,['Car_Body','Door_FL','Door_FR','Door_RL','Door_RR']);
    const isGlass=anyAncestor(o,['Car_Glass','Door_FL','Door_FR','Door_RL','Door_RR']);
@@ -175,18 +205,38 @@ function Model({paintIndex,interiorIndex,view,openDoors,spinningWheels,headlight
    }
    for(const m of (Array.isArray(o.material)?o.material:[o.material])){
     if(!(m instanceof THREE.MeshStandardMaterial))continue;
-    if(PAINT.has(m.name))paint.push(m);
-    if(ancestorName(o,'Car_Lights')){
-     const group=FRONT_EMITTERS.has(m.name)?'front':REAR_EMITTERS.has(m.name)?'rear':null;
-     if(group){lightSurfaces.push({mat:m,group,baseColor:m.color.clone(),baseEmissive:m.emissive.clone(),baseIntensity:m.emissiveIntensity});}
+    if(!isBrand && PAINT.has(m.name))paint.push(m);
+ 
+    const lensGroup=isBrand?null:FRONT_LENS_PATTERN.test(o.name)?'front':REAR_LENS_PATTERN.test(o.name)?'rear':null;
+    if(lensGroup){
+     // Optical covers are passive when off, but must transmit the LED underneath when on.
+     const physical=m instanceof THREE.MeshPhysicalMaterial?m:null;
+     lightLenses.push({mat:m,group:lensGroup,originalColor:m.color.clone(),originalTransparent:m.transparent,originalOpacity:m.opacity,originalDepthWrite:m.depthWrite,originalTransmission:physical?physical.transmission:null,originalRoughness:m.roughness});
     }
     if(isSeat&&(m.name===SEAT_FRONT||m.name===SEAT_REAR))seats.push(m);
     // Only exterior triangles fade. Crucially, Inner_Body never fades except its paint primitives.
     const category:Managed['category']|null=isGlass&&GLASS.has(m.name)?'glass':isShell?'trim':(ancestorName(o,'Inner_Body')&&PAINT.has(m.name))?'paint':null;
-    if(category)xray.push({mat:m,category:PAINT.has(m.name)?'paint':category,original:{transparent:m.transparent,opacity:m.opacity,depthWrite:m.depthWrite,side:m.side}});
+    if(!isBrand && category)xray.push({mat:m,category:PAINT.has(m.name)?'paint':category,original:{transparent:m.transparent,opacity:m.opacity,depthWrite:m.depthWrite,side:m.side}});
+   }
+   // Name-based mesh-level classification. This never turns the car brand, trim
+   // or other meshes into emitters even if they share Headlight Insides.001.
+   const emitterGroup = !isBrand && FRONT_LED_PATTERN.test(o.name)?'front':!isBrand&&REAR_LED_PATTERN.test(o.name)?'rear':null;
+   const luminousDiffuser = !isBrand && (FRONT_RUNNING_PATTERN.test(o.name)||REAR_DIFFUSER_PATTERN.test(o.name));
+   if(emitterGroup || luminousDiffuser){
+    const group = emitterGroup || (FRONT_RUNNING_PATTERN.test(o.name)?'front':'rear');
+    const original = o.material;
+    const off = Array.isArray(original) ? original.slice() : original;
+    const replacement = (material:THREE.Material):THREE.Material => {
+     // Front running light has two materials; only the specific running-light
+     // glass illuminates. Other optical elements stay as their source material.
+     if(!emitterGroup && group==='front' && material.name!=='GlassRunninglight.001')return material;
+     return litMaterial(group,emitterGroup?'emitter':'diffuser');
+    };
+    const on = Array.isArray(off) ? off.map(replacement) : replacement(off);
+    lightSurfaces.push({mesh:o,group,offMaterial:off,onMaterial:on,originalOrder:o.renderOrder});
    }
   });
-  return {paint,seats,xray,shellOverlays,pivots,lightSurfaces,initialDoor:Object.fromEntries(Object.values(doorPivotMap).map(d=>[d.name,pivots[d.name]?.rotation.y??0])),initialWheel:Object.fromEntries(['FL','FR','RL','RR'].map(k=>[k,pivots[`Pivot_Tyre_${k}`]?.rotation.x??0]))};
+  return {paint,seats,xray,shellOverlays,pivots,lightSurfaces,lightLenses,initialDoor:Object.fromEntries(Object.values(doorPivotMap).map(d=>[d.name,pivots[d.name]?.rotation.y??0])),initialWheel:Object.fromEntries(['FL','FR','RL','RR'].map(k=>[k,pivots[`Pivot_Tyre_${k}`]?.rotation.x??0]))};
  },[root]);
  const xrayLevel=useRef(0);const wheelAngles=useRef<Record<string,number>>({FL:0,FR:0,RL:0,RR:0});
  useEffect(()=>{
@@ -196,6 +246,33 @@ function Model({paintIndex,interiorIndex,view,openDoors,spinningWheels,headlight
    wipe.progress.value=1;
   }
  },[debugPaint,wipe]);
+ // Apply light states immediately on every click (including when R3F runs in
+ // demand mode). Replacing the emitter's material uses no extra draw calls.
+ useEffect(()=>{
+  for(const surface of managed.lightSurfaces){
+   const enabled=surface.group==='front'?headlights:taillights;
+   surface.mesh.material=enabled?surface.onMaterial:surface.offMaterial;
+   surface.mesh.renderOrder=enabled?2:surface.originalOrder;
+  }
+  for(const lens of managed.lightLenses){
+   const enabled=lens.group==='front'?headlights:taillights;
+   const m=lens.mat;
+   // In OFF mode: a naturally tinted but unlit lens.
+   // In ON mode: allow the separately colored emitter/diffuser through.
+   const requiresCompile=!m.transparent || (m instanceof THREE.MeshPhysicalMaterial && (m.transmission!==0 || m.thickness!==0));
+   m.transparent=true;
+   m.opacity=lens.group==='front'?(enabled?.10:.78):(enabled?.19:.68);
+   m.depthWrite=false;
+   m.roughness=enabled?.13:.24;
+   m.color.copy(lens.originalColor);
+   if(lens.group==='rear')m.color.set(enabled?'#f76470':'#68252a');
+   if(lens.group==='front'&&enabled)m.color.set('#f4f9ff');
+   if(m instanceof THREE.MeshPhysicalMaterial){m.transmission=0;m.thickness=0}
+   // Only compile the transparent-lens shader once; repeated light clicks must
+   // not rebuild GPU programs (a source of avoidable graphics spikes).
+   if(requiresCompile)m.needsUpdate=true;
+  }
+ },[managed,headlights,taillights]);
  const seatTarget=useMemo(()=>new THREE.Color(interiors[interiorIndex].color),[interiorIndex]);
  useEffect(()=>{onReady()},[onReady]);
  useFrame((_,delta)=>{
@@ -210,22 +287,8 @@ function Model({paintIndex,interiorIndex,view,openDoors,spinningWheels,headlight
    if(m instanceof THREE.MeshPhysicalMaterial){m.clearcoat=THREE.MathUtils.damp(m.clearcoat,Math.min(.7,p.clearcoat),3.5,dt)}
   });
   managed.seats.forEach(m=>m.color.lerp(seatTarget,k));
-  // Interpolate actual GLB light-surface emissive channels for smooth on/off.
-  for(const surface of managed.lightSurfaces){
-   const lit=surface.group==='front'?headlights:taillights;
-   // The GLB contains large, flat lamp material regions. A large emission
-   // value turns them into white/orange polygon blocks. Keep their surface
-   // geometry visible, tint the active lens, and use restrained emission.
-   const isFront=surface.group==='front';
-   const litColor=new THREE.Color(isFront?'#e4edff':'#bc1028');
-   const lensColor=surface.baseColor.clone().lerp(litColor,isFront?.36:.76);
-   surface.mat.color.lerp(lit?lensColor:surface.baseColor,k*1.6);
-   surface.mat.emissive.lerp(lit?litColor:surface.baseEmissive,k*1.6);
-   surface.mat.emissiveIntensity=THREE.MathUtils.damp(surface.mat.emissiveIntensity,lit?(isFront?.42:.48):Math.min(surface.baseIntensity,.08),6,dt);
-   surface.mat.toneMapped=true;
-   // Detailed LED strips cannot be invented by shader intensity: they require
-   // separate LED-only faces/material slots in the GLB for a pixel-perfect look.
-  }
+  // Lamp states update synchronously in the effect below, not from the
+  // frame loop. This lets OFF/ON remain reliable with demand rendering.
   xrayLevel.current=THREE.MathUtils.damp(xrayLevel.current,view==='xray'?1:0,3.8,dt);
   const t=xrayLevel.current;
   managed.xray.forEach(({mat,original,category})=>{
@@ -258,16 +321,31 @@ function Model({paintIndex,interiorIndex,view,openDoors,spinningWheels,headlight
    pivot.rotation.x=managed.initialWheel[key]+wheelAngles.current[key];
   }
  });
- useEffect(()=>()=>{root.traverse(o=>{if(o instanceof THREE.Mesh)(Array.isArray(o.material)?o.material:[o.material]).forEach(m=>m.dispose())})},[root]);
+ useEffect(()=>()=>{
+  // Release every material clone and each LED override. Geometry/textures belong
+  // to useGLTF's shared cache and must not be disposed here.
+  const dispose=new Set<THREE.Material>();
+  root.traverse(o=>{if(o instanceof THREE.Mesh){for(const m of (Array.isArray(o.material)?o.material:[o.material]))dispose.add(m)}});
+  for(const s of managed.lightSurfaces){
+   for(const m of (Array.isArray(s.offMaterial)?s.offMaterial:[s.offMaterial]))dispose.add(m);
+   for(const m of (Array.isArray(s.onMaterial)?s.onMaterial:[s.onMaterial]))dispose.add(m);
+  }
+  dispose.forEach(m=>m.dispose());
+ },[root,managed]);
  return <primitive object={root}/>;
 }
 function CameraRig({view,controls}:{view:View;controls:React.RefObject<OrbitControlsImpl|null>}){
- const {camera,invalidate}=useThree();const anim=useRef(true);const desired=new THREE.Vector3(),target=new THREE.Vector3();
- useEffect(()=>{anim.current=true;invalidate()},[view,invalidate]);
+ const {camera,invalidate,size}=useThree();const anim=useRef(true);const desired=new THREE.Vector3(),target=new THREE.Vector3();
+ useEffect(()=>{anim.current=true;invalidate()},[view,invalidate,size.width,size.height]);
  useFrame((_,delta)=>{
   if(!anim.current)return;
   const c=cameraPresets[view],k=1-Math.exp(-Math.min(delta,.05)*2.35);
-  desired.set(...c.pos);target.set(...c.target);camera.position.lerp(desired,k);
+  desired.set(...c.pos);target.set(...c.target);
+  // Narrow stages need more distance to keep both bumpers visible.
+  const aspect=size.width/Math.max(1,size.height);
+  const fit=aspect<.8?1.36:aspect<1.18?1.16:1;
+  desired.sub(target).multiplyScalar(fit).add(target);
+  camera.position.lerp(desired,k);
   if(controls.current){controls.current.target.lerp(target,k);controls.current.update()}
   if(camera.position.distanceTo(desired)<.025&&(!controls.current||controls.current.target.distanceTo(target)<.025))anim.current=false;
  });return null;
@@ -283,44 +361,68 @@ function CabinLighting({view}:{view:View}){
  return <><pointLight ref={front} position={[.15,2.38,.55]} color="#fff1dc" intensity={0} distance={3.7} decay={2}/><pointLight ref={rear} position={[0,2.4,-1]} color="#f4e5d5" intensity={0} distance={3.5} decay={2}/></>;
 }
 function Loader(){const {progress}=useProgress();return <Html center><div className="webgl-loading"><div className="loader-ring"/><span>PREPARING YOUR VEHICLE</span><strong>{Math.round(progress)}%</strong></div></Html>}
-function RenderScheduler({signal,spinning}:{signal:string;spinning:boolean}){
+function RenderScheduler({signal,spinning,quality}:{signal:string;spinning:boolean;quality:Quality}){
  const {invalidate}=useThree();
- const timeLeft=useRef(0);
- useEffect(()=>{timeLeft.current=3;invalidate()},[signal,invalidate]);
- useFrame((_,dt)=>{
-  timeLeft.current=Math.max(0,timeLeft.current-Math.min(dt,.05));
-  if(timeLeft.current>0||spinning)invalidate();
- });
+ useEffect(()=>{
+  // Invalidation is paced, rather than recursively requesting an unlimited
+  // 60-120 FPS render. Only animate during a transition or wheel movement.
+  const fps=quality==='low'?20:quality==='balanced'?26:32;
+  let ticks=0;
+  const maxTicks=Math.ceil(fps*3.2);
+  invalidate();
+  const timer=window.setInterval(()=>{
+   invalidate();
+   ticks++;
+   if(!spinning && ticks>=maxTicks)window.clearInterval(timer);
+  },1000/fps);
+  return ()=>window.clearInterval(timer);
+ },[signal,spinning,quality,invalidate]);
+ return null;
+}
+// Listener lifecycle follows React, so manual/unintentional unmounts do not
+// report a false WebGL failure when three.js intentionally disposes the canvas.
+function GraphicsContextGuard({onLost}:{onLost?:()=>void}){
+ const {gl}=useThree();
+ useEffect(()=>{
+   const canvas=gl.domElement;
+   const onLostEvent=(event:Event)=>{event.preventDefault();onLost?.()};
+   canvas.addEventListener('webglcontextlost',onLostEvent);
+   return ()=>canvas.removeEventListener('webglcontextlost',onLostEvent);
+ },[gl,onLost]);
+ return null;
+}
+function PixelRatioLimiter({quality}:{quality:Quality}){
+ const {setDpr,size}=useThree();
+ useEffect(()=>{
+  // High is selectable, but intentionally capped below native resolution.
+  // A cap on total frame pixels also limits large desktop or external monitors.
+  const desired=quality==='low'?.50:quality==='balanced'?.62:.76;
+  const pixelBudget=quality==='low'?500_000:quality==='balanced'?800_000:1_180_000;
+  const fit=Math.sqrt(pixelBudget/Math.max(1,size.width*size.height));
+  setDpr(Math.max(.3,Math.min(desired,fit)));
+ },[quality,size.width,size.height,setDpr]);
  return null;
 }
 function ShowroomArchitecture({quality}:{quality:Quality}){
  // Static geometry only, no expensive realtime reflection framebuffer.
- const lines=useMemo(()=>Array.from({length:11},(_,i)=>i-5),[]);
+ 
  return <group>
   <mesh rotation={[-Math.PI/2,0,0]} position={[0,-.018,0]}>
    <planeGeometry args={[45,45]}/>
-   <meshStandardMaterial color="#e9e0d7" metalness={.12} roughness={quality==='high'?.27:.46}/>
+   <meshStandardMaterial color="#f3ede5" metalness={.05} roughness={.68}/>
   </mesh>
-  {false && lines.map(i=><group key={i}>
-   <mesh rotation={[-Math.PI/2,0,0]} position={[i*1.7,-.009,0]}>
-    <planeGeometry args={[.009,34]}/><meshBasicMaterial color="#cfc1b7" depthWrite={false}/>
-   </mesh>
-   <mesh rotation={[-Math.PI/2,0,0]} position={[0,-.008,i*1.7]}>
-    <planeGeometry args={[34,.009]}/><meshBasicMaterial color="#cfc1b7" depthWrite={false}/>
-   </mesh>
-  </group>)}
   {/* Soft contact ellipse; no shadow map or expensive framebuffer. */}
   <mesh rotation={[-Math.PI/2,0,0]} position={[0,.002,0]}>
-   <circleGeometry args={[2.7,64]}/><meshBasicMaterial color="#8f8278" transparent opacity={.09} depthWrite={false}/>
+   <circleGeometry args={[2.15,48]}/><meshBasicMaterial color="#5d4e45" transparent opacity={.028} depthWrite={false}/>
   </mesh>
   {/* The floor ring is physical scene geometry so it is not hidden by the opaque WebGL canvas. */}
   <mesh rotation={[-Math.PI/2,0,0]} position={[0,.006,0]}>
-   <torusGeometry args={[3.46,.023,8,144]}/>
-   <meshBasicMaterial color="#e9c6a2" toneMapped={false}/>
+   <torusGeometry args={[3.46,.012,8,144]}/>
+   <meshBasicMaterial color="#e9d8ba" toneMapped={false}/>
   </mesh>
   <mesh rotation={[-Math.PI/2,0,0]} position={[0,.004,0]}>
-   <torusGeometry args={[3.46,.095,6,144]}/>
-   <meshBasicMaterial color="#c79b70" transparent opacity={.17} depthWrite={false}/>
+   <torusGeometry args={[3.46,.14,6,144]}/>
+   <meshBasicMaterial color="#d4b48f" transparent opacity={.07} depthWrite={false}/>
   </mesh>
   {/* Suspended ceiling ring, seen as an ellipse from the normal car camera. */}
   <mesh rotation={[-Math.PI/2,0,0]} position={[0,4.75,0]}>
@@ -331,20 +433,24 @@ function ShowroomArchitecture({quality}:{quality:Quality}){
    <torusGeometry args={[3.35,.13,7,144]}/>
    <meshBasicMaterial color="#e5d9cb" transparent opacity={.095} depthWrite={false}/>
   </mesh>
-  {[-5,5].map(x=><mesh key={x} position={[x,1.8,-3.3]}>
-   <boxGeometry args={[.06,2.3,.06]}/><meshBasicMaterial color="#fff2d9"/>
-  </mesh>)}
+
  </group>;
 }
 export function CarScene(props:Props){
  const controls=useRef<OrbitControlsImpl|null>(null);
- const signal=[props.paintIndex,props.interiorIndex,props.view,props.headlights,props.taillights,props.debugPaint,...Object.values(props.openDoors),...Object.values(props.spinningWheels),props.quality].join('|');
+ const signal=[props.paintIndex,props.interiorIndex,props.view,!!props.headlights,!!props.taillights,props.debugPaint,...Object.values(props.openDoors),...Object.values(props.spinningWheels),props.quality].join('|');
  const spinning=Object.values(props.spinningWheels).some(Boolean);
- return <Canvas frameloop={props.paused?'never':'demand'} dpr={props.quality==='low'?.6:props.quality==='balanced'?.8:1} gl={{antialias:false,powerPreference:'low-power',alpha:true,precision:'mediump',stencil:false,depth:true}} camera={{position:[5.4,2.22,7.65],fov:38,near:.03,far:120}} onCreated={({gl})=>{gl.outputColorSpace=THREE.SRGBColorSpace;gl.toneMapping=THREE.ACESFilmicToneMapping;gl.toneMappingExposure=.82}}>
- <RenderScheduler signal={signal} spinning={spinning}/>
+ return <Canvas frameloop={props.paused?'never':'demand'} dpr={0.5} gl={{antialias:false,powerPreference:'low-power',alpha:true,precision:'mediump',stencil:false,depth:true}} camera={{position:[5.4,2.22,7.65],fov:38,near:.03,far:120}} onCreated={({gl})=>{gl.outputColorSpace=THREE.SRGBColorSpace;gl.toneMapping=THREE.ACESFilmicToneMapping;gl.toneMappingExposure=.96}}>
+ <GraphicsContextGuard onLost={props.onContextLost}/>
+ <PixelRatioLimiter quality={props.quality}/><RenderScheduler signal={signal} spinning={spinning} quality={props.quality}/>
  <ShowroomArchitecture quality={props.quality}/>
- <ambientLight intensity={.52}/><hemisphereLight intensity={.85} color="#fff8ee" groundColor="#b3a89c"/>
- <directionalLight intensity={1.65} position={[4,7,6]} color="#fffaf2"/><directionalLight intensity={.95} position={[-5,4,-4]} color="#e8f1ff"/><directionalLight intensity={.6} position={[0,5,0]} color="#ffffff"/>
+ <ambientLight intensity={1.28}/><hemisphereLight intensity={1.32} color="#fffaf4" groundColor="#b8afa7"/>
+ <directionalLight intensity={1.75} position={[4.2,7.2,6.4]} color="#fffaf2"/>
+ <directionalLight intensity={1.35} position={[-5.2,4.6,-4.6]} color="#f5f3f0"/>
+ <directionalLight intensity={1.05} position={[0,5.4,0]} color="#ffffff"/>
+ <directionalLight intensity={1.05} position={[-2.5,2.4,5.4]} color="#fff2e8"/>
+ <pointLight intensity={1.1} position={[0,3.9,2.8]} distance={18} decay={2} color="#fff6ea"/>
+ <pointLight intensity={.62} position={[0,2.8,-3.2]} distance={16} decay={2} color="#f8f2ea"/>
  
 
  <Suspense fallback={<Loader/>}><Model paintIndex={props.paintIndex} interiorIndex={props.interiorIndex} view={props.view} openDoors={props.openDoors} spinningWheels={props.spinningWheels} headlights={props.headlights} taillights={props.taillights} debugPaint={props.debugPaint} onReady={props.onReady}/></Suspense>
